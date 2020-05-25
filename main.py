@@ -4,7 +4,6 @@ from random import randrange
 from sklearn.neighbors import KNeighborsClassifier
 from tsp_solver.greedy import solve_tsp
 
-print(o3d.__version__)
 #################################################################### (1) Initialization 
 # Read ply file
 def init(filename):
