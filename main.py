@@ -2,9 +2,13 @@ import open3d as o3d
 import numpy as np
 from random import randrange
 from sklearn.neighbors import KNeighborsClassifier
+from sklearn.neighbors import NearestNeighbors
+from sklearn.utils.graph import graph_shortest_path
+from sklearn.neighbors import BallTree
 from tsp_solver.greedy import solve_tsp
 
-#################################################################### (1) Initialization 
+print(o3d.__version__)
+############################################# (1) Initialization 
 # Read ply file
 def init(filename):
 	pcd = o3d.io.read_point_cloud(filename)
@@ -69,7 +73,9 @@ def assign_ply_to_off(off_geo_arr, geo_arr, vis_flag):
 
 	return off_pt_assign_dic
 
-#################################################################### (2) 3D to 1D
+
+############################################# (2) 3D point cloud linearization (3D to 1D)
+# Travelling salesman problem (TSP) distance matrix construction
 def construct_tsp_distance_matrix(pt_arr, neighbour_num):
 	neigh = NearestNeighbors(n_neighbors = min(neighbour_num, len(pt_arr)))
 	neigh.fit(pt_arr)
@@ -96,8 +102,8 @@ def bsp_traversal(geo_arr):
 	while flag:
 		temp_partition_arr = []
 		for t in range(0, len(partition_arr_idx)):
-			sub_geo_idx_arr = partition_arr_idx[t]
-			seg_geo_arr = [geo_arr[id] for id in sub_geo_idx_arr]
+			seg_geo_idx_arr = partition_arr_idx[t]
+			seg_geo_arr = [geo_arr[id] for id in seg_geo_idx_arr]
 			sub_tot_num = len(seg_geo_arr)
 			if sub_tot_num>1:
 				X = np.array(seg_geo_arr)
@@ -121,9 +127,9 @@ def bsp_traversal(geo_arr):
 					vec2 = np.asarray(farthest_pt2) - np.asarray(pt)
 					
 					if np.linalg.norm(vec1) < np.linalg.norm(vec2):
-						temp_pt_idx_arr1.append(sub_seg_geo_idx_arr[i])
+						temp_pt_idx_arr1.append(seg_geo_idx_arr[i])
 					else:
-						temp_pt_idx_arr2.append(sub_seg_geo_idx_arr[i])
+						temp_pt_idx_arr2.append(seg_geo_idx_arr[i])
 
 				if len(temp_pt_idx_arr1):
 					temp_partition_arr.append(temp_pt_idx_arr1)
@@ -131,13 +137,13 @@ def bsp_traversal(geo_arr):
 				if len(temp_pt_idx_arr2):
 					temp_partition_arr.append(temp_pt_idx_arr2)
 			else:
-				temp_partition_arr.append(sub_seg_geo_idx_arr)
+				temp_partition_arr.append(seg_geo_idx_arr)
 
 		partition_arr_idx = temp_partition_arr
 
 		flag = 0
-		for sub_seg_geo_idx_arr in partition_arr_idx:
-			if len(sub_seg_geo_idx_arr)>1:
+		for seg_geo_idx_arr in partition_arr_idx:
+			if len(seg_geo_idx_arr)>1:
 				flag = 1
 				break
 		iteration = iteration + 1
@@ -155,16 +161,17 @@ def bsp_traversal_with_tsp(geo_arr, off_geo_arr, off_ply_assign_dic):
 	bsp_traversal_with_tsp_idx_arr = []
 
 	off_bsp_traversal_idx = bsp_traversal(off_geo_arr) # traverse seed points using BSP based traversal
-
+	seed_pt_num = len(off_geo_arr)
 	st_idx = 0
 	end_idx = 0
 	pre_last_pt = []
-	tsp_content_color_huff2 = []
+	bsp_traversal_with_tsp_idx_arr = []
 	for t in range(len(off_bsp_traversal_idx)):
+		print(t, seed_pt_num)
 		idx = off_bsp_traversal_idx[t]
 		nex_off_pt = off_geo_arr[idx]
-		curr_cluster_geo = [geo_arr[id] for id in off_pt_assign_dic[idx]]
-		curr_cluster_idx = off_pt_assign_dic[idx]
+		curr_cluster_geo = [geo_arr[id] for id in off_ply_assign_dic[idx]]
+		curr_cluster_idx = off_ply_assign_dic[idx]
 		X = np.array(curr_cluster_geo)
 		tree = BallTree(X, leaf_size=1)
 
@@ -192,7 +199,7 @@ def bsp_traversal_with_tsp(geo_arr, off_geo_arr, off_ply_assign_dic):
 
 		cluster_path = []
 		if len(curr_cluster_geo)>1:
-			dist_m = construct_tsp_distance_matrix(curr_cluster_geo, nei = 8)
+			dist_m = construct_tsp_distance_matrix(curr_cluster_geo, neighbour_num = 8)
 			cluster_path = solve_tsp(dist_m, endpoints=(st_idx, end_idx))
 		else:
 			if len(curr_cluster_geo):
@@ -204,6 +211,7 @@ def bsp_traversal_with_tsp(geo_arr, off_geo_arr, off_ply_assign_dic):
 	return bsp_traversal_with_tsp_idx_arr
 
 
+############################################# (3) Attribute image generation using hybrid space-filling pattern (1D to 2D)
 
 if __name__ == '__main__':
 	pc_id_arr = ["andrew9_frame0027", "David_frame0000", "ricardo9_frame0039", "phil9_frame0244", "sarah9_frame0018", "Staue_Klimt", "Egyptian_mask", "Shiva_00035", "Facade_00009", "House_without_roof_00057", "Frog_00067", "Arco_Valentino_Dense"]
@@ -212,10 +220,10 @@ if __name__ == '__main__':
 	ply_path = "ply/" + frame_id + ".ply"
 	
 	#Seed points
-	sv_pt_num = 256 # Average point number of supervoxels
+	sv_pt_num = 256 # Average point number of supervoxels, it can also be set to smaller one (e.g. 128 or 64)
 	off_path = "LOD_off/" + frame_id + "_n"+ str(sv_pt_num) + ".off" #
 
-	off_path = floder + "LOD_off" + "/" + frame_id + "_n"+ str(sv_pt_num) + ".off"
+	off_path = floder + "LOD_off" + "/" + frame_id_head + "_n"+ str(sv_pt_num) + ".off"
 	ply_path = floder + frame_id + ".ply"
 
 	[geo_arr, rgb_arr, y_comp_arr, point_num, pc_width] = init(ply_path)
@@ -225,7 +233,8 @@ if __name__ == '__main__':
 	off_ply_assign_dic = assign_ply_to_off(off_geo_arr, geo_arr, vis_flag=False)
 
 	#Binary space partition (BSP) based universal traversal (with/without tsp)
-	# bsp_traversal_idx_arr = bsp_traversal(geo_arr) 
-	bsp_traversal_with_tsp_idx_arr = bsp_traversal_with_tsp(geo_arr, rgb_arr, off_geo_arr, off_ply_assign_dic)
+	# bsp_traversal_idx_arr = bsp_traversal(geo_arr) # This function can also be used to traversal the whole point cloud
+	bsp_traversal_with_tsp_idx_arr = bsp_traversal_with_tsp(geo_arr, off_geo_arr, off_ply_assign_dic)
+
   
   #to be continued
