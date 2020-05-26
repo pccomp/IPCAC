@@ -1,3 +1,4 @@
+# This work has been submitted to ACM Multimedia 2020
 import open3d as o3d
 import numpy as np
 from random import randrange
@@ -6,8 +7,8 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.utils.graph import graph_shortest_path
 from sklearn.neighbors import BallTree
 from tsp_solver.greedy import solve_tsp
+import cv2
 
-print(o3d.__version__)
 ############################################# (1) Initialization 
 # Read ply file
 def init(filename):
@@ -210,8 +211,171 @@ def bsp_traversal_with_tsp(geo_arr, off_geo_arr, off_ply_assign_dic):
 
 	return bsp_traversal_with_tsp_idx_arr
 
-
 ############################################# (3) Attribute image generation using hybrid space-filling pattern (1D to 2D)
+def hori_snake_curve(blk_color_arr, hori_snake_b):
+	blk_img = np.ones((hori_snake_b, hori_snake_b, 3), np.uint8)*0
+	for t in range(len(blk_color_arr)):
+		y_pos = int(t/hori_snake_b)
+		x_pos = ((-1)**(y_pos%2))*(t%hori_snake_b) + (hori_snake_b-1)*(y_pos%2)
+		blk_img[y_pos][x_pos] = blk_color_arr[t]
+	return blk_img
+
+def rot(n, x, y, rx, ry):
+	if (ry == 0):
+		if (rx == 1):
+			x = n-1 - x
+			y = n-1 - y
+		t = x
+		x = y
+		y = t
+	return [x,y]
+
+def get_hilbert_pos(hilbert_b, hilbert_idx):
+	rx = 0
+	ry = 0
+	t = hilbert_idx
+	x = 0
+	y = 0
+	s = 1
+	while s<hilbert_b:
+		rx = 1 & int(t/2)
+		ry = 1 & (int(t) ^ rx)
+		[x,y] = rot(s, x, y, rx, ry)
+		x = x + s * rx
+		y = y + s * ry
+		t = t/4
+		s = s*2
+	return [x, y]
+
+def hybrid_space_filling(color_arr, mb_size, hori_snake_b):
+	hilbert_b = int(mb_size/hori_snake_b) # mb_size = 2^n1, 	hori_snake_b = 2^n2,		hori_snake_b < mb_size
+	tot_pt_num = len(color_arr)
+	blk_num = int(np.ceil(tot_pt_num/(mb_size*mb_size)))
+	sub_blk_num = int(np.ceil(tot_pt_num/(hori_snake_b*hori_snake_b)))
+	attr_img = np.ones((mb_size, blk_num*mb_size, 3), np.uint8)*0
+
+	for blk_idx in range(sub_blk_num):
+		blk_color_arr = color_arr[blk_idx*hori_snake_b*hori_snake_b:(blk_idx+1)*hori_snake_b*hori_snake_b]
+		blk_img = hori_snake_curve(blk_color_arr, hori_snake_b)
+		[hil_x, hil_y] = get_hilbert_pos(hilbert_b, blk_idx%(hilbert_b*hilbert_b))
+		attr_img[hil_y*hori_snake_b:(hil_y+1)*hori_snake_b, hil_x*hori_snake_b + int(blk_idx/(hilbert_b*hilbert_b))*mb_size:(hil_x+1)*hori_snake_b + int(blk_idx/(hilbert_b*hilbert_b))*mb_size] = blk_img
+	return attr_img
+
+############################################
+def img_compression(attr_img, pt_num, mb_size, cmp_method, extra_bit):
+	mode = 0
+	if cmp_method == "jpg":
+		mode = int(cv2.IMWRITE_JPEG_QUALITY)
+	elif cmp_method == "webp":
+		mode = int(cv2.IMWRITE_WEBP_QUALITY)
+	quality_arr = [20, 50, 80, 90]
+		
+	blk_size = int(np.floor(16376.0/b)*b)
+	
+	img_h, img_w, c = attr_img.shape
+	attr_img_yuv = cv2.cvtColor(attr_img, cv2.COLOR_BGR2YUV)
+	attr_img_y = attr_img_yuv[:,:,0]
+	
+	bpp_arr = []
+	psnr_arr = []
+	size_arr = []
+	diff_arr = []
+	for quality in quality_arr:
+		yuv_size = 0
+		tot_diff = 0.0
+		for i in range(0, int(np.ceil(img_w/blk_size))):
+			compressed_img_path = 'img\\' + str(i) + '_' + str(quality) + "." + cmp_method
+			sub_attr_img = attr_img[:, i*blk_size:(i+1)*blk_size]
+			cv2.imwrite(compressed_img_path, sub_attr_img, [mode, quality])
+			sub_attr_img_y = attr_img_y[:, i*blk_size:(i+1)*blk_size]
+			sub_attr_img_yuv_size = os.stat(compressed_img_path).st_size
+			yuv_size = yuv_size + sub_attr_img_yuv_size
+			compressed_yuv_img = cv2.imread(compressed_img_path)
+			compressed_yuv_img_y = cv2.cvtColor(compressed_yuv_img, cv2.COLOR_BGR2YUV)[:,:,0]
+			for s in range(0, compressed_yuv_img_y.shape[0]):
+				for t in range(0, compressed_yuv_img_y.shape[1]):
+					dif = int(sub_attr_img_y[s][t]) - int(compressed_yuv_img_y[s][t])
+					dif = dif*dif
+					tot_diff = tot_diff + dif
+		mse = tot_diff/pt_num
+		psnr = 20*np.log10(255.0/np.sqrt(mse))
+		bpp = yuv_size*8.0/pt_num
+		if extra_bit:
+			bpp = (yuv_size*8.0 + extra_bit)/pt_num
+		bpp_arr.append(bpp)
+		psnr_arr.append(psnr)
+		diff_arr.append(tot_diff)
+		size_arr.append(yuv_size)
+
+	return [bpp_arr, psnr_arr, diff_arr, size_arr]
+
+############################################
+def BD_RATE(R1, PSNR1, R2, PSNR2, piecewise=0):
+	lR1 = np.log(R1)
+	lR2 = np.log(R2)
+
+	# rate method
+	p1 = np.polyfit(PSNR1, lR1, 3)
+	p2 = np.polyfit(PSNR2, lR2, 3)
+
+	# integration interval
+	min_int = max(min(PSNR1), min(PSNR2))
+	max_int = min(max(PSNR1), max(PSNR2))
+
+	# find integral
+	if piecewise == 0:
+		p_int1 = np.polyint(p1)
+		p_int2 = np.polyint(p2)
+
+		int1 = np.polyval(p_int1, max_int) - np.polyval(p_int1, min_int)
+		int2 = np.polyval(p_int2, max_int) - np.polyval(p_int2, min_int)
+	else:
+		lin = np.linspace(min_int, max_int, num=100, retstep=True)
+		interval = lin[1]
+		samples = lin[0]
+		v1 = scipy.interpolate.pchip_interpolate(np.sort(PSNR1), np.sort(lR1), samples)
+		v2 = scipy.interpolate.pchip_interpolate(np.sort(PSNR2), np.sort(lR2), samples)
+		# Calculate the integral using the trapezoid method on the samples.
+		int1 = np.trapz(v1, dx=interval)
+		int2 = np.trapz(v2, dx=interval)
+
+	# find avg diff
+	avg_exp_diff = (int2-int1)/(max_int-min_int)
+	avg_diff = (np.exp(avg_exp_diff)-1)*100
+	return avg_diff
+
+def BD_PSNR(R1, PSNR1, R2, PSNR2, piecewise=0):
+	lR1 = np.log(R1)
+	lR2 = np.log(R2)
+
+	p1 = np.polyfit(lR1, PSNR1, 3)
+	p2 = np.polyfit(lR2, PSNR2, 3)
+
+	# integration interval
+	min_int = max(min(lR1), min(lR2))
+	max_int = min(max(lR1), max(lR2))
+
+	# find integral
+	if piecewise == 0:
+		p_int1 = np.polyint(p1)
+		p_int2 = np.polyint(p2)
+
+		int1 = np.polyval(p_int1, max_int) - np.polyval(p_int1, min_int)
+		int2 = np.polyval(p_int2, max_int) - np.polyval(p_int2, min_int)
+	else:
+		lin = np.linspace(min_int, max_int, num=100, retstep=True)
+		interval = lin[1]
+		samples = lin[0]
+		v1 = scipy.interpolate.pchip_interpolate(np.sort(lR1), np.sort(PSNR1), samples)
+		v2 = scipy.interpolate.pchip_interpolate(np.sort(lR2), np.sort(PSNR2), samples)
+		# Calculate the integral using the trapezoid method on the samples.
+		int1 = np.trapz(v1, dx=interval)
+		int2 = np.trapz(v2, dx=interval)
+
+	# find avg diff
+	avg_diff = (int2-int1)/(max_int-min_int)
+
+	return avg_diff
 
 if __name__ == '__main__':
 	pc_id_arr = ["andrew9_frame0027", "David_frame0000", "ricardo9_frame0039", "phil9_frame0244", "sarah9_frame0018", "Staue_Klimt", "Egyptian_mask", "Shiva_00035", "Facade_00009", "House_without_roof_00057", "Frog_00067", "Arco_Valentino_Dense"]
@@ -220,9 +384,9 @@ if __name__ == '__main__':
 	ply_path = "ply/" + frame_id + ".ply"
 	
 	#Seed points
-	sv_pt_num = 256 # Average point number of supervoxels, it can also be set to smaller one (e.g. 128 or 64)
+	sv_pt_num = 128 # Average point number of supervoxels, it can also be set to smaller one (e.g. 128 or 64)
 	off_path = "LOD_off/" + frame_id + "_n"+ str(sv_pt_num) + ".off" #
-
+	
 	off_path = floder + "LOD_off" + "/" + frame_id_head + "_n"+ str(sv_pt_num) + ".off"
 	ply_path = floder + frame_id + ".ply"
 
@@ -232,9 +396,15 @@ if __name__ == '__main__':
 	# Supervoxel generation
 	off_ply_assign_dic = assign_ply_to_off(off_geo_arr, geo_arr, vis_flag=False)
 
-	#Binary space partition (BSP) based universal traversal (with/without tsp)
+	# Binary space partition (BSP) based universal traversal (with/without tsp)
 	# bsp_traversal_idx_arr = bsp_traversal(geo_arr) # This function can also be used to traversal the whole point cloud
 	bsp_traversal_with_tsp_idx_arr = bsp_traversal_with_tsp(geo_arr, off_geo_arr, off_ply_assign_dic)
+
+	bsp_traversal_color_arr = [rgb_arr[idx][::-1] for idx in bsp_traversal_with_tsp_idx_arr]
+
+	sfc_based_attr_img = hybrid_space_filling(bsp_traversal_color_arr, mb_size = 16, hori_snake_b = 4)
+	[bpp_arr, psnr_arr, diff_arr, size_arr] = img_compression(sfc_based_attr_img, len(bsp_traversal_color_arr), mb_size = 16, cmp_method = "jpg", extra_bit = 0) #cmp_method = "webp"
+	print([bpp_arr, psnr_arr, diff_arr, size_arr])
 
   
   #to be continued
