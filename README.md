@@ -11,4 +11,4 @@ numpy 1.13.3
 sklearn 0.21.3
 
 tsp_solver (pip install tsp_solver2)
-
+opencv 3.3.1
