@@ -270,7 +270,7 @@ def img_compression(attr_img, pt_num, mb_size, cmp_method, extra_bit):
 		mode = int(cv2.IMWRITE_WEBP_QUALITY)
 	quality_arr = [20, 50, 80, 90]
 		
-	blk_size = int(np.floor(16376.0/b)*b)
+	blk_size = int(np.floor(16376.0/mb_size)*mb_size)
 	
 	img_h, img_w, c = attr_img.shape
 	attr_img_yuv = cv2.cvtColor(attr_img, cv2.COLOR_BGR2YUV)
