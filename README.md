@@ -13,3 +13,5 @@ sklearn 0.21.3
 tsp_solver (pip install tsp_solver2)
 
 opencv 3.3.1
+
+rasterfairy (pip install rasterfairy)
