@@ -8,6 +8,7 @@ from sklearn.utils.graph import graph_shortest_path
 from sklearn.neighbors import BallTree
 from tsp_solver.greedy import solve_tsp
 import cv2
+import os
 
 ############################################# (1) Initialization 
 # Read ply file
