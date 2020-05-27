@@ -1,5 +1,6 @@
 # This work has been submitted to ACM Multimedia 2020
 
+# This work has been submitted to ACM Multimedia 2020
 import open3d as o3d
 import numpy as np
 from random import randrange
@@ -11,6 +12,7 @@ from tsp_solver.greedy import solve_tsp
 import cv2
 import os
 
+print(cv2.__version__)
 ############################################# (1) Initialization 
 # Read ply file
 def init(filename):
@@ -76,8 +78,7 @@ def assign_ply_to_off(off_geo_arr, geo_arr, vis_flag):
 
 	return off_pt_assign_dic
 
-
-############################################# (2) 3D point cloud linearization (3D to 1D)
+############################################# (2.1) BSP-based 3D point cloud linearization (3D to 1D)
 # Travelling salesman problem (TSP) distance matrix construction
 def construct_tsp_distance_matrix(pt_arr, neighbour_num):
 	neigh = NearestNeighbors(n_neighbors = min(neighbour_num, len(pt_arr)))
@@ -213,6 +214,524 @@ def bsp_traversal_with_tsp(geo_arr, off_geo_arr, off_ply_assign_dic):
 
 	return bsp_traversal_with_tsp_idx_arr
 
+#############################################  (2.2) Octree-based (depth first traversal) 3D point cloud linearization (3D to 1D)
+class OctNode(object):
+	"""
+	New Octnode Class, can be appended to as well i think
+	"""
+	def __init__(self, position, size, depth, data):
+		"""
+		OctNode Cubes have a position and size
+		position is related to, but not the same as the objects the node contains.
+
+		Branches (or children) follow a predictable pattern to make accesses simple.
+		Here, - means less than 'origin' in that dimension, + means greater than.
+		branch: 0 1 2 3 4 5 6 7
+		x:      - - - - + + + +
+		y:      - - + + - - + +
+		z:      - + - + - + - +
+		"""
+		self.position = position
+		self.size = size
+		self.depth = depth
+
+		## All OctNodes will be leaf nodes at first
+		## Then subdivided later as more objects get added
+		self.isLeafNode = True
+
+		## store our object, typically this will be one, but maybe more
+		self.data = data
+
+		## might as well give it some emtpy branches while we are here.
+		self.branches = [None, None, None, None, None, None, None, None]
+
+		half = size / 2
+
+		## The cube's bounding coordinates
+		self.lower = (position[0] - half, position[1] - half, position[2] - half)
+		self.upper = (position[0] + half, position[1] + half, position[2] + half)
+
+	def __str__(self):
+		data_str = u", ".join((str(x) for x in self.data))
+		return u"position: {0}, size: {1}, depth: {2} leaf: {3}, data: {4}".format(
+			self.position, self.size, self.depth, self.isLeafNode, data_str
+		)
+
+class Octree(object):
+	"""
+	The octree itself, which is capable of adding and searching for nodes.
+	"""
+	def __init__(self, worldSize, origin=(0, 0, 0), max_type="nodes", max_value=10):
+		"""
+		Init the world bounding root cube
+		all world geometry is inside this
+		it will first be created as a leaf node (ie, without branches)
+		this is because it has no objects, which is less than MAX_OBJECTS_PER_CUBE
+		if we insert more objects into it than MAX_OBJECTS_PER_CUBE, then it will subdivide itself.
+
+		"""
+		self.root = OctNode(origin, worldSize, 0, [])
+		self.worldSize = worldSize
+		self.limit_nodes = (max_type=="nodes")
+		self.limit = max_value
+
+	@staticmethod
+	def CreateNode(position, size, objects):
+		"""This creates the actual OctNode itself."""
+		return OctNode(position, size, objects)
+
+	def insertNode(self, position, objData=None):
+		"""
+		Add the given object to the octree if possible
+
+		Parameters
+		----------
+		position : array_like with 3 elements
+			The spatial location for the object
+		objData : optional
+			The data to store at this position. By default stores the position.
+
+			If the object does not have a position attribute, the object
+			itself is assumed to be the position.
+
+		Returns
+		-------
+		node : OctNode or None
+			The node in which the data is stored or None if outside the
+			octree's boundary volume.
+
+		"""
+		if np:
+			if np.any(position < self.root.lower):
+				return None
+			if np.any(position > self.root.upper):
+				return None
+		else:
+			if position < self.root.lower:
+				return None
+			if position > self.root.upper:
+				return None
+
+		if objData is None:
+			objData = position
+
+		return self.__insertNode(self.root, self.root.size, self.root, position, objData)
+
+	def __insertNode(self, root, size, parent, position, objData):
+		"""Private version of insertNode() that is called recursively"""
+		if root is None:
+			# we're inserting a single object, so if we reach an empty node, insert it here
+			# Our new node will be a leaf with one object, our object
+			# More may be added later, or the node maybe subdivided if too many are added
+			# Find the Real Geometric centre point of our new node:
+			# Found from the position of the parent node supplied in the arguments
+			pos = parent.position
+
+			## offset is halfway across the size allocated for this node
+			offset = size / 2
+
+			## find out which direction we're heading in
+			branch = self.__findBranch(parent, position)
+
+			## new center = parent position + (branch direction * offset)
+			newCenter = (0, 0, 0)
+
+			if branch == 0:
+				newCenter = (pos[0] - offset, pos[1] - offset, pos[2] - offset )
+			elif branch == 1:
+				newCenter = (pos[0] - offset, pos[1] - offset, pos[2] + offset )
+			elif branch == 2:
+				newCenter = (pos[0] - offset, pos[1] + offset, pos[2] - offset )
+			elif branch == 3:
+				newCenter = (pos[0] - offset, pos[1] + offset, pos[2] + offset )
+			elif branch == 4:
+				newCenter = (pos[0] + offset, pos[1] - offset, pos[2] - offset )
+			elif branch == 5:
+				newCenter = (pos[0] + offset, pos[1] - offset, pos[2] + offset )
+			elif branch == 6:
+				newCenter = (pos[0] + offset, pos[1] + offset, pos[2] - offset )
+			elif branch == 7:
+				newCenter = (pos[0] + offset, pos[1] + offset, pos[2] + offset )
+
+			# Now we know the centre point of the new node
+			# we already know the size as supplied by the parent node
+			# So create a new node at this position in the tree
+			# print "Adding Node of size: " + str(size / 2) + " at " + str(newCenter)
+			return OctNode(newCenter, size, parent.depth + 1, [objData])
+
+		#else: are we not at our position, but not at a leaf node either
+		elif (
+			not root.isLeafNode
+			and
+			(
+				(np and np.any(root.position != position))
+				or
+				(root.position != position)
+			)
+		):
+
+			# we're in an octNode still, we need to traverse further
+			branch = self.__findBranch(root, position)
+			# Find the new scale we working with
+			newSize = root.size / 2
+			# Perform the same operation on the appropriate branch recursively
+			root.branches[branch] = self.__insertNode(root.branches[branch], newSize, root, position, objData)
+
+		# else, is this node a leaf node with objects already in it?
+		elif root.isLeafNode:
+			# We've reached a leaf node. This has no branches yet, but does hold
+			# some objects, at the moment, this has to be less objects than MAX_OBJECTS_PER_CUBE
+			# otherwise this would not be a leafNode (elementary my dear watson).
+			# if we add the node to this branch will we be over the limit?
+			if (
+				(self.limit_nodes and len(root.data) < self.limit)
+				or
+				(not self.limit_nodes and root.depth >= self.limit)
+			):
+				# No? then Add to the Node's list of objects and we're done
+				root.data.append(objData)
+				#return root
+			else:
+				# Adding this object to this leaf takes us over the limit
+				# So we have to subdivide the leaf and redistribute the objects
+				# on the new children.
+				# Add the new object to pre-existing list
+				root.data.append(objData)
+				# copy the list
+				objList = root.data
+				# Clear this node's data
+				root.data = None
+				# It is not a leaf node anymore
+				root.isLeafNode = False
+				# Calculate the size of the new children
+				newSize = root.size / 2
+				# distribute the objects on the new tree
+				# print "Subdividing Node sized at: " + str(root.size) + " at " + str(root.position)
+				for ob in objList:
+					# Use the position attribute of the object if possible
+					if hasattr(ob, "position"):
+						pos = ob.position
+					else:
+						pos = ob
+					branch = self.__findBranch(root, pos)
+					root.branches[branch] = self.__insertNode(root.branches[branch], newSize, root, pos, ob)
+		return root
+
+	def findPosition(self, position):
+		"""
+		Basic lookup that finds the leaf node containing the specified position
+		Returns the child objects of the leaf, or None if the leaf is empty or none
+		"""
+		if np:
+			if np.any(position < self.root.lower):
+				return None
+			if np.any(position > self.root.upper):
+				return None
+		else:
+			if position < self.root.lower:
+				return None
+			if position > self.root.upper:
+				return None
+		return self.__findPosition(self.root, position)
+
+	@staticmethod
+	def __findPosition(node, position, count=0, branch=0):
+		"""Private version of findPosition """
+		if node.isLeafNode:
+			#print("The position is", position, " data is", node.data)
+			return node.data
+		branch = Octree.__findBranch(node, position)
+		child = node.branches[branch]
+		if child is None:
+			return None
+		return Octree.__findPosition(child, position, count + 1, branch)
+
+	@staticmethod
+	def __findBranch(root, position):
+		"""
+		helper function
+		returns an index corresponding to a branch
+		pointing in the direction we want to go
+		"""
+		index = 0
+		if (position[0] >= root.position[0]):
+			index |= 4
+		if (position[1] >= root.position[1]):
+			index |= 2
+		if (position[2] >= root.position[2]):
+			index |= 1
+		return index
+
+	def iterateDepthFirst(self):
+		"""Iterate through the octree depth-first"""
+		gen = self.__iterateDepthFirst(self.root)
+		for n in gen:
+			yield n
+
+	@staticmethod
+	def __iterateDepthFirst(root):
+		"""Private (static) version of iterateDepthFirst"""
+
+		for branch in root.branches:
+			if branch is None:
+				continue
+			for n in Octree.__iterateDepthFirst(branch):
+				yield n
+			if branch.isLeafNode:
+				yield branch
+
+def octree_depth_first_traversal(geo_arr): 
+	class TestObject(object):
+		def __init__(self, name, position):
+			self.name = name
+			self.position = position
+
+		def __str__(self):
+			return u"name: {0} position: {1}".format(self.name, self.position)
+	NUM_TEST_OBJECTS = len(geo_arr)
+
+	testObjects = []
+	for x in range(NUM_TEST_OBJECTS):
+		the_name = "Node__" + str(x)
+		the_pos = (
+			geo_arr[x][0],
+			geo_arr[x][1],
+			geo_arr[x][2]
+		)
+		testObjects.append(TestObject(the_name, the_pos))
+
+	test_trees = (
+		("nodes", 1),
+		("depth", 12)
+	)
+
+	WORLD_SIZE = 2000
+
+	# ORIGIN = (WORLD_SIZE, WORLD_SIZE, WORLD_SIZE)
+	ORIGIN = (500, 500, 500)
+	octree_dft_idx_arr = []
+	for tree_params in test_trees:
+		myTree = Octree(
+			WORLD_SIZE,
+			ORIGIN,
+			max_type=tree_params[0],
+			max_value=tree_params[1]
+		)
+
+		# Start = time.time()
+		for testObject in testObjects:
+			myTree.insertNode(testObject.position, testObject)
+		# End = time.time() - Start
+
+		# if myTree.limit_nodes:
+		#     print("Tree Leaves contain a maximum of", myTree.limit, "objects each.")
+		# else:
+		#     print("Tree has a maximum depth of", myTree.limit)
+
+		# print("Depth First")
+		
+		for i, x in enumerate(myTree.iterateDepthFirst()):
+			# print(i, ":", x)
+			pt_id = str(x).split("name: Node__")[-1].split(" position")[0]
+			# if not int(pt_id) in octree_dft_idx_arr:
+			octree_dft_idx_arr.append(int(pt_id))
+		break
+	return octree_dft_idx_arr
+
+#############################################  (2.3) 3D Hilbert space-filling curve based 3D point cloud linearization (3D to 1D)
+def _binary_repr(num, width):
+	"""Return a binary string representation of `num` zero padded to `width`
+	bits."""
+	return format(num, 'b').zfill(width)
+
+class HilbertCurve:
+
+	def __init__(self, p, n):
+		"""Initialize a hilbert curve with,
+
+		Args:
+			p (int): iterations to use in the hilbert curve
+			n (int): number of dimensions
+		"""
+		if p <= 0:
+			raise ValueError('p must be > 0')
+		if n <= 0:
+			raise ValueError('n must be > 0')
+		self.p = p
+		self.n = n
+
+		# maximum distance along curve
+		self.max_h = 2**(self.p * self.n) - 1
+
+		# maximum coordinate value in any dimension
+		self.max_x = 2**self.p - 1
+
+	def _hilbert_integer_to_transpose(self, h):
+		"""Store a hilbert integer (`h`) as its transpose (`x`).
+
+		Args:
+			h (int): integer distance along hilbert curve
+
+		Returns:
+			x (list): transpose of h
+					  (n components with values between 0 and 2**p-1)
+		"""
+		h_bit_str = _binary_repr(h, self.p*self.n)
+		x = [int(h_bit_str[i::self.n], 2) for i in range(self.n)]
+		return x
+
+	def _transpose_to_hilbert_integer(self, x):
+		"""Restore a hilbert integer (`h`) from its transpose (`x`).
+
+		Args:
+			x (list): transpose of h
+					  (n components with values between 0 and 2**p-1)
+
+		Returns:
+			h (int): integer distance along hilbert curve
+		"""
+		x_bit_str = [_binary_repr(x[i], self.p) for i in range(self.n)]
+		h = int(''.join([y[i] for i in range(self.p) for y in x_bit_str]), 2)
+		return h
+
+	def coordinates_from_distance(self, h):
+		"""Return the coordinates for a given hilbert distance.
+
+		Args:
+			h (int): integer distance along hilbert curve
+
+		Returns:
+			x (list): transpose of h
+					  (n components with values between 0 and 2**p-1)
+		"""
+		if h > self.max_h:
+			raise ValueError('h={} is greater than 2**(p*N)-1={}'.format(h, self.max_h))
+		if h < 0:
+			raise ValueError('h={} but must be > 0'.format(h))
+
+		x = self._hilbert_integer_to_transpose(h)
+		Z = 2 << (self.p-1)
+
+		# Gray decode by H ^ (H/2)
+		t = x[self.n-1] >> 1
+		for i in range(self.n-1, 0, -1):
+			x[i] ^= x[i-1]
+		x[0] ^= t
+
+		# Undo excess work
+		Q = 2
+		while Q != Z:
+			P = Q - 1
+			for i in range(self.n-1, -1, -1):
+				if x[i] & Q:
+					# invert
+					x[0] ^= P
+				else:
+					# exchange
+					t = (x[0] ^ x[i]) & P
+					x[0] ^= t
+					x[i] ^= t
+			Q <<= 1
+
+		# done
+		return x
+
+	def distance_from_coordinates(self, x_in):
+		"""Return the hilbert distance for a given set of coordinates.
+
+		Args:
+			x_in (list): transpose of h
+						 (n components with values between 0 and 2**p-1)
+
+		Returns:
+			h (int): integer distance along hilbert curve
+		"""
+		x = list(x_in)
+		if len(x) != self.n:
+			raise ValueError('x={} must have N={} dimensions'.format(x, self.n))
+
+		if any(elx > self.max_x for elx in x):
+			raise ValueError(
+				'invalid coordinate input x={}.  one or more dimensions have a '
+				'value greater than 2**p-1={}'.format(x, self.max_x))
+
+		if any(elx < 0 for elx in x):
+			raise ValueError(
+				'invalid coordinate input x={}.  one or more dimensions have a '
+				'value less than 0'.format(x))
+
+		M = 1 << (self.p - 1)
+
+		# Inverse undo excess work
+		Q = M
+		while Q > 1:
+			P = Q - 1
+			for i in range(self.n):
+				if x[i] & Q:
+					x[0] ^= P
+				else:
+					t = (x[0] ^ x[i]) & P
+					x[0] ^= t
+					x[i] ^= t
+			Q >>= 1
+
+		# Gray encode
+		for i in range(1, self.n):
+			x[i] ^= x[i-1]
+		t = 0
+		Q = M
+		while Q > 1:
+			if x[self.n-1] & Q:
+				t ^= Q - 1
+			Q >>= 1
+		for i in range(self.n):
+			x[i] ^= t
+
+		h = self._transpose_to_hilbert_integer(x)
+		return h
+
+def get_pc_boundingbox(minPt, maxPt): 
+	dis = np.asarray(maxPt) - np.asarray(minPt)
+	max_dis = max(dis)/2.0
+	center = (np.asarray(maxPt) + np.asarray(minPt))/2.0
+	[x0, y0, z0] = np.asarray(center) - [max_dis, max_dis, max_dis]
+	[x1, y1, z1] = np.asarray(center) + [max_dis, max_dis, max_dis]
+	return [[x0, y0, z0], [x1, y1, z1], max_dis*2]
+
+def hilbert_sfc_traversal(geo_arr):
+	geo_arr = np.asarray(geo_arr)
+	minPt = [min(geo_arr[:,0]), min(geo_arr[:,1]), min(geo_arr[:,2])]
+	maxPt = [max(geo_arr[:,0]), max(geo_arr[:,1]), max(geo_arr[:,2])]
+	[lb_pt, rt_pt, radius] = get_pc_boundingbox(minPt, maxPt)
+	p=10
+	N=3
+	hilbert_curve = HilbertCurve(p, N)
+
+	cell_num = 2**p
+	radius = radius*1.00001
+	cell_len = radius/cell_num
+	dic = dict()
+	
+	i = 0
+	for pt in geo_arr:
+		x_pos = int((pt[0] - lb_pt[0])/cell_len)
+		y_pos = int((pt[1] - lb_pt[1])/cell_len)
+		z_pos = int((pt[2] - lb_pt[2])/cell_len)
+		coords = [x_pos, y_pos, z_pos]
+		dist = hilbert_curve.distance_from_coordinates(coords)
+		if not dist in dic:
+			dic[dist] = []
+		dic[dist].append(i)
+		i = i + 1
+
+	hilbert_traversal_idx_arr = []
+	for i in range(0, 2**(N*p)):
+		if i in dic:
+			for idx in dic[i]:
+				hilbert_traversal_idx_arr.append(idx)
+
+	return hilbert_traversal_idx_arr
+
 ############################################# (3) Attribute image generation using hybrid space-filling pattern (1D to 2D)
 def hori_snake_curve(blk_color_arr, hori_snake_b):
 	blk_img = np.ones((hori_snake_b, hori_snake_b, 3), np.uint8)*0
@@ -280,8 +799,8 @@ def img_compression(attr_img, pt_num, mb_size, cmp_method, extra_bit):
 	
 	bpp_arr = []
 	psnr_arr = []
-	size_arr = []
-	diff_arr = []
+	# size_arr = []
+	# diff_arr = []
 	for quality in quality_arr:
 		yuv_size = 0
 		tot_diff = 0.0
@@ -306,10 +825,10 @@ def img_compression(attr_img, pt_num, mb_size, cmp_method, extra_bit):
 			bpp = (yuv_size*8.0 + extra_bit)/pt_num
 		bpp_arr.append(bpp)
 		psnr_arr.append(psnr)
-		diff_arr.append(tot_diff)
-		size_arr.append(yuv_size)
+		# diff_arr.append(tot_diff)
+		# size_arr.append(yuv_size)
 
-	return [bpp_arr, psnr_arr, diff_arr, size_arr]
+	return [bpp_arr, psnr_arr]
 
 ############################################
 def BD_RATE(R1, PSNR1, R2, PSNR2, piecewise=0):
@@ -401,15 +920,26 @@ if __name__ == '__main__':
 	# Supervoxel generation
 	off_ply_assign_dic = assign_ply_to_off(off_geo_arr, geo_arr, vis_flag=False)
 
+	# Octree depth first traversal
+	# octree_dft_idx_arr = octree_depth_first_traversal(geo_arr)
+	# octree_dft_traversal_color_arr = [rgb_arr[idx][::-1] for idx in octree_dft_idx_arr]
+
+	# 3D Hilbert space-filling curve based
+	# hilbert_traversal_idx_arr = hilbert_sfc_traversal(geo_arr)
+	# hilbert_traversal_color_arr = [rgb_arr[idx][::-1] for idx in hilbert_traversal_idx_arr]
+
 	# Binary space partition (BSP) based universal traversal (with/without tsp)
 	# bsp_traversal_idx_arr = bsp_traversal(geo_arr) # This function can also be used to traversal the whole point cloud
-	bsp_traversal_with_tsp_idx_arr = bsp_traversal_with_tsp(geo_arr, off_geo_arr, off_ply_assign_dic)
+	# bsp_traversal_color_arr = [rgb_arr[idx][::-1] for idx in bsp_traversal_with_tsp_idx_arr]
+	
+	# bsp_traversal_with_tsp_idx_arr = bsp_traversal_with_tsp(geo_arr, off_geo_arr, off_ply_assign_dic)
+	# bsp_traversal_with_tsp_color_arr = [rgb_arr[idx][::-1] for idx in bsp_traversal_with_tsp_idx_arr]
 
-	bsp_traversal_color_arr = [rgb_arr[idx][::-1] for idx in bsp_traversal_with_tsp_idx_arr]
+	sfc_based_attr_img = hybrid_space_filling(bsp_traversal_with_tsp_color_arr, mb_size = 16, hori_snake_b = 4)
+	[bpp_arr, psnr_arr] = img_compression(sfc_based_attr_img, point_num, mb_size = 16, cmp_method = "webp", extra_bit = 0) #cmp_method = "webp"
+	print([bpp_arr, psnr_arr])
 
-	sfc_based_attr_img = hybrid_space_filling(bsp_traversal_color_arr, mb_size = 16, hori_snake_b = 4)
-	[bpp_arr, psnr_arr, diff_arr, size_arr] = img_compression(sfc_based_attr_img, len(bsp_traversal_color_arr), mb_size = 16, cmp_method = "webp", extra_bit = 0) #cmp_method = "webp"
-	print([bpp_arr, psnr_arr, diff_arr, size_arr])
+
 
   
   #to be continued
