@@ -1,4 +1,5 @@
 # This work has been submitted to ACM Multimedia 2020
+
 import open3d as o3d
 import numpy as np
 from random import randrange
@@ -262,7 +263,7 @@ def hybrid_space_filling(color_arr, mb_size, hori_snake_b):
 		attr_img[hil_y*hori_snake_b:(hil_y+1)*hori_snake_b, hil_x*hori_snake_b + int(blk_idx/(hilbert_b*hilbert_b))*mb_size:(hil_x+1)*hori_snake_b + int(blk_idx/(hilbert_b*hilbert_b))*mb_size] = blk_img
 	return attr_img
 
-############################################
+############################################ Image compression
 def img_compression(attr_img, pt_num, mb_size, cmp_method, extra_bit):
 	mode = 0
 	if cmp_method == "jpg":
@@ -271,7 +272,7 @@ def img_compression(attr_img, pt_num, mb_size, cmp_method, extra_bit):
 		mode = int(cv2.IMWRITE_WEBP_QUALITY)
 	quality_arr = [20, 50, 80, 90]
 		
-	blk_size = int(np.floor(16376.0/mb_size)*mb_size)
+	blk_size = int(np.floor(16376.0/mb_size)*mb_size) # The maximum pixel dimensions of a WebP image is 16383 x 16383.
 	
 	img_h, img_w, c = attr_img.shape
 	attr_img_yuv = cv2.cvtColor(attr_img, cv2.COLOR_BGR2YUV)
@@ -312,6 +313,7 @@ def img_compression(attr_img, pt_num, mb_size, cmp_method, extra_bit):
 
 ############################################
 def BD_RATE(R1, PSNR1, R2, PSNR2, piecewise=0):
+	#https://github.com/Anserw/Bjontegaard_metric
 	lR1 = np.log(R1)
 	lR2 = np.log(R2)
 
@@ -364,6 +366,7 @@ def BD_PSNR(R1, PSNR1, R2, PSNR2, piecewise=0):
 		int1 = np.polyval(p_int1, max_int) - np.polyval(p_int1, min_int)
 		int2 = np.polyval(p_int2, max_int) - np.polyval(p_int2, min_int)
 	else:
+		# See https://chromium.googlesource.com/webm/contributor-guide/+/master/scripts/visual_metrics.py
 		lin = np.linspace(min_int, max_int, num=100, retstep=True)
 		interval = lin[1]
 		samples = lin[0]
@@ -378,6 +381,7 @@ def BD_PSNR(R1, PSNR1, R2, PSNR2, piecewise=0):
 
 	return avg_diff
 
+
 if __name__ == '__main__':
 	pc_id_arr = ["andrew9_frame0027", "David_frame0000", "ricardo9_frame0039", "phil9_frame0244", "sarah9_frame0018", "Staue_Klimt", "Egyptian_mask", "Shiva_00035", "Facade_00009", "House_without_roof_00057", "Frog_00067", "Arco_Valentino_Dense"]
 	frame_id = pc_id_arr[0]
@@ -385,9 +389,9 @@ if __name__ == '__main__':
 	ply_path = "ply/" + frame_id + ".ply"
 	
 	#Seed points
-	sv_pt_num = 128 # Average point number of supervoxels, it can also be set to smaller one (e.g. 128 or 64)
+	sv_pt_num = 256 # Average point number of supervoxels, it can also be set to smaller one (e.g. 128 or 64)
 	off_path = "LOD_off/" + frame_id + "_n"+ str(sv_pt_num) + ".off" #
-	
+
 	off_path = floder + "LOD_off" + "/" + frame_id_head + "_n"+ str(sv_pt_num) + ".off"
 	ply_path = floder + frame_id + ".ply"
 
@@ -404,7 +408,7 @@ if __name__ == '__main__':
 	bsp_traversal_color_arr = [rgb_arr[idx][::-1] for idx in bsp_traversal_with_tsp_idx_arr]
 
 	sfc_based_attr_img = hybrid_space_filling(bsp_traversal_color_arr, mb_size = 16, hori_snake_b = 4)
-	[bpp_arr, psnr_arr, diff_arr, size_arr] = img_compression(sfc_based_attr_img, len(bsp_traversal_color_arr), mb_size = 16, cmp_method = "jpg", extra_bit = 0) #cmp_method = "webp"
+	[bpp_arr, psnr_arr, diff_arr, size_arr] = img_compression(sfc_based_attr_img, len(bsp_traversal_color_arr), mb_size = 16, cmp_method = "webp", extra_bit = 0) #cmp_method = "webp"
 	print([bpp_arr, psnr_arr, diff_arr, size_arr])
 
   
