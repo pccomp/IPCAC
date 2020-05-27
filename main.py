@@ -7,12 +7,21 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.neighbors import NearestNeighbors
 from sklearn.utils.graph import graph_shortest_path
 from sklearn.neighbors import BallTree
+from sklearn import manifold
 from tsp_solver.greedy import solve_tsp
 import cv2
 import os
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+from sklearn.cluster import DBSCAN
+import rasterfairy
 
-print(cv2.__version__)
-############################################# (1) Initialization 
+##############################################################################################################################
+# 																						 									 #
+#											(1) Initialization and Preprocessing											 #
+# 																						 									 #
+##############################################################################################################################
 # Read ply file
 def init(filename):
 	pcd = o3d.io.read_point_cloud(filename)
@@ -77,7 +86,15 @@ def assign_ply_to_off(off_geo_arr, geo_arr, vis_flag):
 
 	return off_pt_assign_dic
 
-############################################# (2.1) BSP-based 3D point cloud linearization (3D to 1D)
+
+
+##############################################################################################################################
+# 																						 									 #
+# 							(2) Scheme I: SFC-based Point Cloud Attribuate Image Generation 								 #
+# 																						 									 #
+##############################################################################################################################
+### BSP-based 3D point cloud linearization (3D to 1D)
+
 # Travelling salesman problem (TSP) distance matrix construction
 def construct_tsp_distance_matrix(pt_arr, neighbour_num):
 	neigh = NearestNeighbors(n_neighbors = min(neighbour_num, len(pt_arr)))
@@ -213,7 +230,332 @@ def bsp_traversal_with_tsp(geo_arr, off_geo_arr, off_ply_assign_dic):
 
 	return bsp_traversal_with_tsp_idx_arr
 
-#############################################  (2.2) Octree-based (depth first traversal) 3D point cloud linearization (3D to 1D)
+### Attribute image generation using hybrid space-filling pattern (1D to 2D)
+def hori_snake_curve(blk_color_arr, hori_snake_b):
+	blk_img = np.ones((hori_snake_b, hori_snake_b, 3), np.uint8)*0
+	for t in range(len(blk_color_arr)):
+		y_pos = int(t/hori_snake_b)
+		x_pos = ((-1)**(y_pos%2))*(t%hori_snake_b) + (hori_snake_b-1)*(y_pos%2)
+		blk_img[y_pos][x_pos] = blk_color_arr[t]
+	return blk_img
+
+def rot(n, x, y, rx, ry):
+	if (ry == 0):
+		if (rx == 1):
+			x = n-1 - x
+			y = n-1 - y
+		t = x
+		x = y
+		y = t
+	return [x,y]
+
+def get_hilbert_pos(hilbert_b, hilbert_idx):
+	rx = 0
+	ry = 0
+	t = hilbert_idx
+	x = 0
+	y = 0
+	s = 1
+	while s<hilbert_b:
+		rx = 1 & int(t/2)
+		ry = 1 & (int(t) ^ rx)
+		[x,y] = rot(s, x, y, rx, ry)
+		x = x + s * rx
+		y = y + s * ry
+		t = t/4
+		s = s*2
+	return [x, y]
+
+def hybrid_space_filling(color_arr, mb_size, hori_snake_b):
+	hilbert_b = int(mb_size/hori_snake_b) # mb_size = 2^n1, 	hori_snake_b = 2^n2,		hori_snake_b < mb_size
+	tot_pt_num = len(color_arr)
+	blk_num = int(np.ceil(tot_pt_num/(mb_size*mb_size)))
+	sub_blk_num = int(np.ceil(tot_pt_num/(hori_snake_b*hori_snake_b)))
+	attr_img = np.ones((mb_size, blk_num*mb_size, 3), np.uint8)*0
+
+	for blk_idx in range(sub_blk_num):
+		blk_color_arr = color_arr[blk_idx*hori_snake_b*hori_snake_b:(blk_idx+1)*hori_snake_b*hori_snake_b]
+		blk_img = hori_snake_curve(blk_color_arr, hori_snake_b)
+		[hil_x, hil_y] = get_hilbert_pos(hilbert_b, blk_idx%(hilbert_b*hilbert_b))
+		attr_img[hil_y*hori_snake_b:(hil_y+1)*hori_snake_b, hil_x*hori_snake_b + int(blk_idx/(hilbert_b*hilbert_b))*mb_size:(hil_x+1)*hori_snake_b + int(blk_idx/(hilbert_b*hilbert_b))*mb_size] = blk_img
+	return attr_img
+
+
+##############################################################################################################################
+# 																						 									 #
+# 							(3) Scheme II: IsoMap-based Point Cloud Attribuate Image Generation 							 #
+# 																						 									 #
+##############################################################################################################################
+def get_neighbor_dis(pt_arr):
+	tot_num = len(pt_arr)
+	X = np.array(pt_arr)
+	tree = BallTree(X, leaf_size = 1)
+	neighbor_num = 2
+	dis_arr = []
+	for i in range(0, tot_num, max(int(tot_num/1000), 1)):
+		dist, ind = tree.query([pt_arr[0]], k=neighbor_num)
+		dis_arr.append(dist[0][1])
+	neighbor_dis = min(dis_arr)
+	return neighbor_dis
+
+def dbscan_clustering(pt_arr, dbscan_thresh):
+	clustering = DBSCAN(eps=dbscan_thresh, min_samples=1).fit(pt_arr)
+	label_arr = list(clustering.labels_)
+	cluster_dic = dict()
+	for i in range(len(pt_arr)):
+		label = label_arr[i]
+		if not label in cluster_dic:
+			cluster_dic[label] = []
+		cluster_dic[label].append(i)
+	return cluster_dic
+
+def reshape_sfc_based_attribute_img(patch_rgb, square_w, mb_size, hori_snake_b):
+	patch_sfc_img = hybrid_space_filling([rgb[::-1] for rgb in patch_rgb], mb_size, hori_snake_b)
+	patch_sfc_img_squre = np.ones((square_w, square_w, 3), np.uint8)*0 # reshape sfc-based attribute image by stacking its fragments vertically. 
+
+	for s in range(0, int(square_w/mb_size)):
+		sub_img = patch_sfc_img[:, s*square_w:(s+1)*square_w]
+		sub_img_h, sub_img_w, c = sub_img.shape
+		if s%2 == 1:
+			for ss in range(0, sub_img_w):
+				patch_sfc_img_squre[s*mb_size:(s+1)*mb_size, square_w - ss - 1] = sub_img[:, ss]
+		else:
+			for ss in range(0, sub_img_w):
+				patch_sfc_img_squre[s*mb_size:(s+1)*mb_size, ss] = sub_img[:, ss]
+
+	return patch_sfc_img_squre
+
+def isomap_based_dimension_reduction(patch_geo_arr, patch_off_arr, landmark_flag):
+	if landmark_flag:
+		n_neighbors = min(8, len(patch_off_arr))
+		n_components = 2
+		X_off8 = np.matrix(patch_off_arr)
+		embedding = manifold.Isomap(n_neighbors, n_components, eigen_solver='dense')
+		Y_off8 = embedding.fit_transform(X_off8)
+		reconstruction_err = embedding.reconstruction_error()
+		Y = []
+		if len(patch_geo_arr)>5000:
+			for t in range(0, len(patch_geo_arr), 5000):
+				print(t, len(patch_geo_arr))
+				sub_non_smooth_sc_geo_arr = patch_geo_arr[t:t+5000]
+				sub_X = np.matrix(sub_non_smooth_sc_geo_arr)
+				sub_Y = embedding.transform(sub_X)
+				for val in sub_Y:
+					Y.append(val)
+		else:
+			X = np.matrix(patch_geo_arr)
+			Y = embedding.transform(X)
+		d2_geo = [[val[0], val[1], 0] for val in Y]
+
+		return [d2_geo, reconstruction_err]
+	else:
+		n_neighbors = min(8, len(patch_geo_arr)-1)
+		n_components = 2
+		embedding = manifold.Isomap(n_neighbors, n_components, eigen_solver='dense')
+		X = np.matrix(patch_geo_arr)
+		Y = embedding.fit_transform(X)
+		reconstruction_err = embedding.reconstruction_error()
+		d2_geo = [[val[0], val[1], 0] for val in Y]
+
+		return [d2_geo, reconstruction_err]
+
+def placement_cost(img):
+	img_h, img_w, c = img.shape
+	cost = 0
+
+	for i in range(img_h):
+		for j in range(img_w):
+			[b, g, r] = img[i][j]
+			cur_y = int(np.round(0.299*r + 0.587*g + 0.114*b, 0))
+			try:
+				[b, g, r] = img[i+1][j]
+				nei_y = int(np.round(0.299*r + 0.587*g + 0.114*b, 0))
+				cost = cost + np.abs(nei_y-cur_y)
+			except:
+				continue
+			try:
+				[b, g, r] = img[i-1][j]
+				nei_y = int(np.round(0.299*r + 0.587*g + 0.114*b, 0))
+				cost = cost + np.abs(nei_y-cur_y)
+			except:
+				continue
+			try:
+				[b, g, r] = img[i][j+1]
+				nei_y = int(np.round(0.299*r + 0.587*g + 0.114*b, 0))
+				cost = cost + np.abs(nei_y-cur_y)
+			except:
+				continue
+			try:
+				[b, g, r] = img[i][j-1]
+				nei_y = int(np.round(0.299*r + 0.587*g + 0.114*b, 0))
+				cost = cost + np.abs(nei_y-cur_y)
+			except:
+				continue
+	return cost
+
+def isomap_based_attr_img_gen(traversal_idx_arr, geo_arr, rgb_arr, mb_size, hori_snake_b):
+	tot_pt_num = len(traversal_idx_arr)
+	square_w = 64 # size of patch attribute image mb_size
+	patch_size = square_w*square_w # number of points of a patch
+
+	ply_neighbor_dis = get_neighbor_dis(geo_arr)
+	dbscan_thresh = ply_neighbor_dis*5
+	isomap_thresh = 20
+
+	pc_attr_img = np.ones((square_w, 0, 3), np.uint8)*0
+
+	for t in range(0, tot_pt_num, patch_size):
+		patch_geo = []
+		patch_rgb = []
+		patch_off_geo_arr = [] # the simplified point cloud of a patch can be used to improve the IsoMap-based embedding efficiency 
+		for idx in traversal_idx_arr[t:t+patch_size]:
+			patch_geo.append(geo_arr[idx])
+			patch_rgb.append(rgb_arr[idx])
+			# patch_off_geo_arr.append()
+
+		patch_sfc_img_squre = reshape_sfc_based_attribute_img(patch_rgb, square_w, mb_size, hori_snake_b)
+		sfc_cost = placement_cost(patch_sfc_img_squre)
+
+		y_comp_arr = [int(np.round(0.299*rgb[0] + 0.587*rgb[1] + 0.114*rgb[2], 0)) for rgb in patch_rgb]
+		cluster_y_std = np.std(y_comp_arr)
+
+		# if cluster_y_std < lower_threshold or cluster_y_std > upper_threshold: # For patches with very high or very low color variance, SFC-based scheme generally can work very well. 
+		if t + patch_size >= tot_pt_num - 1 and tot_pt_num%patch_size != 0:
+			pc_attr_img = np.hstack((pc_attr_img, patch_sfc_img_squre))
+		else:
+			cluster_dic = dbscan_clustering(patch_geo, dbscan_thresh)
+			if len(cluster_dic) == 1:
+				[patch_geo_arr_d2, recon_err] = isomap_based_dimension_reduction(patch_geo, patch_off_geo_arr, len(patch_off_geo_arr)>8)
+				print(t/patch_size, recon_err)
+				if recon_err > isomap_thresh:
+					pc_attr_img = np.hstack((pc_attr_img, patch_sfc_img_squre))
+				else:
+					grid_xy,(width,height) = rasterfairy.transformPointCloud2D(np.asarray(patch_geo_arr_d2)[:, 0:2], autoAdjustCount = False)
+					grid_img = np.ones((height, width, 3), np.uint8)*0
+
+					for i in range(0, len(patch_geo_arr_d2)):
+						grid_img[int(grid_xy[i][1])][int(grid_xy[i][0])] = patch_rgb[i][::-1]
+
+					isomap_cost = placement_cost(grid_img)
+					if sfc_cost > isomap_cost:
+						pc_attr_img = np.hstack((pc_attr_img, grid_img))
+					else:
+						pc_attr_img = np.hstack((pc_attr_img, patch_sfc_img_squre))
+
+			else:		
+				d2_dic = dict()
+				mode_flag = 1
+				for cluster_id in cluster_dic:
+					sub_patch_geo = []
+					sub_patch_rgb = []
+					sub_patch_off_geo_arr = []
+					for idx in cluster_dic[cluster_id]:
+						sub_patch_geo.append(patch_geo[idx])
+						sub_patch_rgb.append(patch_rgb[idx])
+					[sub_patch_geo_arr_d2, sub_recon_err] = isomap_based_dimension_reduction(sub_patch_geo, sub_patch_off_geo_arr, len(sub_patch_off_geo_arr)>8)
+					print(t/patch_size, sub_recon_err)
+					d2_dic[cluster_id] = [sub_patch_geo_arr_d2, sub_patch_rgb, len(sub_patch_rgb)]
+					if sub_recon_err> isomap_thresh:
+						mode_flag = 0
+						break
+
+				if mode_flag:
+					sorted_x = sorted(d2_dic.items(), key=lambda x: x[1][2], reverse=True)
+					merged_patch_geo_d2 = []
+					merged_patch_rgb = []
+					for rec in sorted_x:
+						sub_patch_geo_arr_d2 = rec[1][0]
+						sub_patch_rgb = rec[1][1]
+						if len(merged_patch_geo_d2) == 0:
+							merged_patch_geo_d2 = merged_patch_geo_d2 + sub_patch_geo_arr_d2
+							merged_patch_rgb = merged_patch_rgb + sub_patch_rgb
+						else:
+							max_x = np.max(np.asarray(merged_patch_geo_d2)[:, 0])
+							max_y = np.max(np.asarray(merged_patch_geo_d2)[:, 1])
+							sub_min_x = np.min(np.asarray(sub_patch_geo_arr_d2)[:, 0])
+							sub_min_y = np.min(np.asarray(sub_patch_geo_arr_d2)[:, 1])
+							mov_x = max_x - sub_min_x
+							mov_y = max_y - sub_min_y
+							merged_patch_rgb = merged_patch_rgb + sub_patch_rgb
+							for pt in sub_patch_geo_arr_d2:
+								merged_patch_geo_d2.append([pt[0] + mov_x*1.2, pt[1] + mov_y*1.2, pt[2]])
+
+					grid_xy,(width,height) = rasterfairy.transformPointCloud2D(np.asarray(merged_patch_geo_d2)[:, 0:2], autoAdjustCount = False)
+					grid_img = np.ones((height, width, 3), np.uint8)*0
+
+					for i in range(0, len(merged_patch_geo_d2)):
+						grid_img[int(grid_xy[i][1])][int(grid_xy[i][0])] = merged_patch_rgb[i][::-1]
+
+					isomap_cost = placement_cost(grid_img)
+
+					if sfc_cost > isomap_cost:
+						pc_attr_img = np.hstack((pc_attr_img, grid_img))
+					else:
+						pc_attr_img = np.hstack((pc_attr_img, patch_sfc_img_squre))
+				else:
+					pc_attr_img = np.hstack((pc_attr_img, patch_sfc_img_squre))
+
+	return pc_attr_img
+			
+##############################################################################################################################
+# 																						 									 #
+# 												(4) Image compression 														 #
+# 																						 									 #
+############################################################################################################################## 
+def img_compression(attr_img, pt_num, mb_size, cmp_method, extra_bit):
+	mode = 0
+	if cmp_method == "jpg":
+		mode = int(cv2.IMWRITE_JPEG_QUALITY)
+	elif cmp_method == "webp":
+		mode = int(cv2.IMWRITE_WEBP_QUALITY)
+	quality_arr = [20, 50, 80, 90]
+		
+	blk_size = int(np.floor(16376.0/mb_size)*mb_size) # The maximum pixel dimensions of a WebP image is 16383 x 16383.
+	
+	img_h, img_w, c = attr_img.shape
+	attr_img_yuv = cv2.cvtColor(attr_img, cv2.COLOR_BGR2YUV)
+	attr_img_y = attr_img_yuv[:,:,0]
+	
+	bpp_arr = []
+	psnr_arr = []
+	# size_arr = []
+	# diff_arr = []
+	for quality in quality_arr:
+		yuv_size = 0
+		tot_diff = 0.0
+		for i in range(0, int(np.ceil(img_w/blk_size))):
+			compressed_img_path = 'img\\' + str(i) + '_' + str(quality) + "." + cmp_method
+			sub_attr_img = attr_img[:, i*blk_size:(i+1)*blk_size]
+			cv2.imwrite(compressed_img_path, sub_attr_img, [mode, quality])
+			sub_attr_img_y = attr_img_y[:, i*blk_size:(i+1)*blk_size]
+			sub_attr_img_yuv_size = os.stat(compressed_img_path).st_size
+			yuv_size = yuv_size + sub_attr_img_yuv_size
+			compressed_yuv_img = cv2.imread(compressed_img_path)
+			compressed_yuv_img_y = cv2.cvtColor(compressed_yuv_img, cv2.COLOR_BGR2YUV)[:,:,0]
+			for s in range(0, compressed_yuv_img_y.shape[0]):
+				for t in range(0, compressed_yuv_img_y.shape[1]):
+					dif = int(sub_attr_img_y[s][t]) - int(compressed_yuv_img_y[s][t])
+					dif = dif*dif
+					tot_diff = tot_diff + dif
+		mse = tot_diff/pt_num
+		psnr = 20*np.log10(255.0/np.sqrt(mse))
+		bpp = yuv_size*8.0/pt_num
+		if extra_bit:
+			bpp = (yuv_size*8.0 + extra_bit)/pt_num
+		bpp_arr.append(bpp)
+		psnr_arr.append(psnr)
+		# diff_arr.append(tot_diff)
+		# size_arr.append(yuv_size)
+
+	return [bpp_arr, psnr_arr]
+
+
+##############################################################################################################################
+# 																						 									 #
+# 												(5) Other functionalites 													 #
+# 																						 									 #
+##############################################################################################################################
+### Octree-based (depth first traversal) 3D point cloud linearization (3D to 1D)
 class OctNode(object):
 	"""
 	New Octnode Class, can be appended to as well i think
@@ -537,7 +879,7 @@ def octree_depth_first_traversal(geo_arr):
 		break
 	return octree_dft_idx_arr
 
-#############################################  (2.3) 3D Hilbert space-filling curve based 3D point cloud linearization (3D to 1D)
+### 3D Hilbert space-filling curve based 3D point cloud linearization (3D to 1D)
 def _binary_repr(num, width):
 	"""Return a binary string representation of `num` zero padded to `width`
 	bits."""
@@ -731,105 +1073,23 @@ def hilbert_sfc_traversal(geo_arr):
 
 	return hilbert_traversal_idx_arr
 
-############################################# (3) Attribute image generation using hybrid space-filling pattern (1D to 2D)
-def hori_snake_curve(blk_color_arr, hori_snake_b):
-	blk_img = np.ones((hori_snake_b, hori_snake_b, 3), np.uint8)*0
-	for t in range(len(blk_color_arr)):
-		y_pos = int(t/hori_snake_b)
-		x_pos = ((-1)**(y_pos%2))*(t%hori_snake_b) + (hori_snake_b-1)*(y_pos%2)
-		blk_img[y_pos][x_pos] = blk_color_arr[t]
-	return blk_img
+def traversal_order_visualization(traversal_idx_arr, geo_arr):
+	vis_geo = []
+	vis_rgb = []
 
-def rot(n, x, y, rx, ry):
-	if (ry == 0):
-		if (rx == 1):
-			x = n-1 - x
-			y = n-1 - y
-		t = x
-		x = y
-		y = t
-	return [x,y]
+	colors = cm.viridis(np.linspace(0, 1, len(traversal_idx_arr))) # other color schemes: gist_rainbow, nipy_spectral, plasma, inferno, magma, cividis
+	for t in range(len(traversal_idx_arr)):
+		idx = traversal_idx_arr[t]
+		rgb = colors[t][0:3]
+		vis_geo.append(geo_arr[idx])
+		vis_rgb.append(rgb)
 
-def get_hilbert_pos(hilbert_b, hilbert_idx):
-	rx = 0
-	ry = 0
-	t = hilbert_idx
-	x = 0
-	y = 0
-	s = 1
-	while s<hilbert_b:
-		rx = 1 & int(t/2)
-		ry = 1 & (int(t) ^ rx)
-		[x,y] = rot(s, x, y, rx, ry)
-		x = x + s * rx
-		y = y + s * ry
-		t = t/4
-		s = s*2
-	return [x, y]
+	pcd = o3d.geometry.PointCloud()
+	pcd.points = o3d.utility.Vector3dVector(vis_geo)
+	pcd.colors = o3d.utility.Vector3dVector(np.asarray(vis_rgb))
+	o3d.visualization.draw_geometries([pcd])
 
-def hybrid_space_filling(color_arr, mb_size, hori_snake_b):
-	hilbert_b = int(mb_size/hori_snake_b) # mb_size = 2^n1, 	hori_snake_b = 2^n2,		hori_snake_b < mb_size
-	tot_pt_num = len(color_arr)
-	blk_num = int(np.ceil(tot_pt_num/(mb_size*mb_size)))
-	sub_blk_num = int(np.ceil(tot_pt_num/(hori_snake_b*hori_snake_b)))
-	attr_img = np.ones((mb_size, blk_num*mb_size, 3), np.uint8)*0
-
-	for blk_idx in range(sub_blk_num):
-		blk_color_arr = color_arr[blk_idx*hori_snake_b*hori_snake_b:(blk_idx+1)*hori_snake_b*hori_snake_b]
-		blk_img = hori_snake_curve(blk_color_arr, hori_snake_b)
-		[hil_x, hil_y] = get_hilbert_pos(hilbert_b, blk_idx%(hilbert_b*hilbert_b))
-		attr_img[hil_y*hori_snake_b:(hil_y+1)*hori_snake_b, hil_x*hori_snake_b + int(blk_idx/(hilbert_b*hilbert_b))*mb_size:(hil_x+1)*hori_snake_b + int(blk_idx/(hilbert_b*hilbert_b))*mb_size] = blk_img
-	return attr_img
-
-############################################ Image compression
-def img_compression(attr_img, pt_num, mb_size, cmp_method, extra_bit):
-	mode = 0
-	if cmp_method == "jpg":
-		mode = int(cv2.IMWRITE_JPEG_QUALITY)
-	elif cmp_method == "webp":
-		mode = int(cv2.IMWRITE_WEBP_QUALITY)
-	quality_arr = [20, 50, 80, 90]
-		
-	blk_size = int(np.floor(16376.0/mb_size)*mb_size) # The maximum pixel dimensions of a WebP image is 16383 x 16383.
-	
-	img_h, img_w, c = attr_img.shape
-	attr_img_yuv = cv2.cvtColor(attr_img, cv2.COLOR_BGR2YUV)
-	attr_img_y = attr_img_yuv[:,:,0]
-	
-	bpp_arr = []
-	psnr_arr = []
-	# size_arr = []
-	# diff_arr = []
-	for quality in quality_arr:
-		yuv_size = 0
-		tot_diff = 0.0
-		for i in range(0, int(np.ceil(img_w/blk_size))):
-			compressed_img_path = 'img\\' + str(i) + '_' + str(quality) + "." + cmp_method
-			sub_attr_img = attr_img[:, i*blk_size:(i+1)*blk_size]
-			cv2.imwrite(compressed_img_path, sub_attr_img, [mode, quality])
-			sub_attr_img_y = attr_img_y[:, i*blk_size:(i+1)*blk_size]
-			sub_attr_img_yuv_size = os.stat(compressed_img_path).st_size
-			yuv_size = yuv_size + sub_attr_img_yuv_size
-			compressed_yuv_img = cv2.imread(compressed_img_path)
-			compressed_yuv_img_y = cv2.cvtColor(compressed_yuv_img, cv2.COLOR_BGR2YUV)[:,:,0]
-			for s in range(0, compressed_yuv_img_y.shape[0]):
-				for t in range(0, compressed_yuv_img_y.shape[1]):
-					dif = int(sub_attr_img_y[s][t]) - int(compressed_yuv_img_y[s][t])
-					dif = dif*dif
-					tot_diff = tot_diff + dif
-		mse = tot_diff/pt_num
-		psnr = 20*np.log10(255.0/np.sqrt(mse))
-		bpp = yuv_size*8.0/pt_num
-		if extra_bit:
-			bpp = (yuv_size*8.0 + extra_bit)/pt_num
-		bpp_arr.append(bpp)
-		psnr_arr.append(psnr)
-		# diff_arr.append(tot_diff)
-		# size_arr.append(yuv_size)
-
-	return [bpp_arr, psnr_arr]
-
-############################################
+# Bjontegaard_metric
 def BD_RATE(R1, PSNR1, R2, PSNR2, piecewise=0):
 	#https://github.com/Anserw/Bjontegaard_metric
 	lR1 = np.log(R1)
@@ -902,7 +1162,7 @@ def BD_PSNR(R1, PSNR1, R2, PSNR2, piecewise=0):
 
 if __name__ == '__main__':
 	pc_id_arr = ["andrew9_frame0027", "David_frame0000", "ricardo9_frame0039", "phil9_frame0244", "sarah9_frame0018", "Staue_Klimt", "Egyptian_mask", "Shiva_00035", "Facade_00009", "House_without_roof_00057", "Frog_00067", "Arco_Valentino_Dense"]
-	frame_id = pc_id_arr[0]
+	frame_id = pc_id_arr[3]
 
 	ply_path = "ply/" + frame_id + ".ply"
 	
@@ -919,26 +1179,26 @@ if __name__ == '__main__':
 	# Supervoxel generation
 	off_ply_assign_dic = assign_ply_to_off(off_geo_arr, geo_arr, vis_flag=False)
 
-	# Octree depth first traversal
+	## Octree depth first traversal
 	# octree_dft_idx_arr = octree_depth_first_traversal(geo_arr)
 	# octree_dft_traversal_color_arr = [rgb_arr[idx][::-1] for idx in octree_dft_idx_arr]
 
-	# 3D Hilbert space-filling curve based
+	## 3D Hilbert space-filling curve based
 	# hilbert_traversal_idx_arr = hilbert_sfc_traversal(geo_arr)
 	# hilbert_traversal_color_arr = [rgb_arr[idx][::-1] for idx in hilbert_traversal_idx_arr]
 
-	# Binary space partition (BSP) based universal traversal (with/without tsp)
+	## Binary space partition (BSP) based universal traversal (with/without tsp)
 	# bsp_traversal_idx_arr = bsp_traversal(geo_arr) # This function can also be used to traversal the whole point cloud
 	# bsp_traversal_color_arr = [rgb_arr[idx][::-1] for idx in bsp_traversal_with_tsp_idx_arr]
 	
-	# bsp_traversal_with_tsp_idx_arr = bsp_traversal_with_tsp(geo_arr, off_geo_arr, off_ply_assign_dic)
+	bsp_traversal_with_tsp_idx_arr = bsp_traversal_with_tsp(geo_arr, off_geo_arr, off_ply_assign_dic)
 	# bsp_traversal_with_tsp_color_arr = [rgb_arr[idx][::-1] for idx in bsp_traversal_with_tsp_idx_arr]
 
-	sfc_based_attr_img = hybrid_space_filling(bsp_traversal_with_tsp_color_arr, mb_size = 16, hori_snake_b = 4)
-	[bpp_arr, psnr_arr] = img_compression(sfc_based_attr_img, point_num, mb_size = 16, cmp_method = "webp", extra_bit = 0) #cmp_method = "webp"
-	print([bpp_arr, psnr_arr])
+	# sfc_based_attr_img = hybrid_space_filling(bsp_traversal_with_tsp_color_arr, mb_size = 16, hori_snake_b = 4)
+	# [bpp_arr, psnr_arr] = img_compression(sfc_based_attr_img, point_num, mb_size = 16, cmp_method = "webp", extra_bit = 0) #cmp_method = "webp"
+	# print([bpp_arr, psnr_arr])
 
+	# traversal_order_visualization(bsp_traversal_with_tsp_idx_arr, geo_arr)
 
+	isomap_based_attr_img_gen(bsp_traversal_with_tsp_idx_arr, geo_arr, rgb_arr, mb_size = 16, hori_snake_b = 4)
 
-  
-  #to be continued
