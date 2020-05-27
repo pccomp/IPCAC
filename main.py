@@ -1183,14 +1183,13 @@ if __name__ == '__main__':
 	# octree_dft_idx_arr = octree_depth_first_traversal(geo_arr)
 	# octree_dft_traversal_color_arr = [rgb_arr[idx][::-1] for idx in octree_dft_idx_arr]
 
-	## 3D Hilbert space-filling curve based
+	## 3D Hilbert space-filling curve based traversal
 	# hilbert_traversal_idx_arr = hilbert_sfc_traversal(geo_arr)
 	# hilbert_traversal_color_arr = [rgb_arr[idx][::-1] for idx in hilbert_traversal_idx_arr]
 
 	## Binary space partition (BSP) based universal traversal (with/without tsp)
 	# bsp_traversal_idx_arr = bsp_traversal(geo_arr) # This function can also be used to traversal the whole point cloud
 	# bsp_traversal_color_arr = [rgb_arr[idx][::-1] for idx in bsp_traversal_with_tsp_idx_arr]
-	
 	bsp_traversal_with_tsp_idx_arr = bsp_traversal_with_tsp(geo_arr, off_geo_arr, off_ply_assign_dic)
 	# bsp_traversal_with_tsp_color_arr = [rgb_arr[idx][::-1] for idx in bsp_traversal_with_tsp_idx_arr]
 
