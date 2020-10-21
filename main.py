@@ -1,4 +1,4 @@
-# This work has been submitted to ACM Multimedia 2020
+# This work has been submitted to IEEE TIP
 
 import open3d as o3d
 import numpy as np
